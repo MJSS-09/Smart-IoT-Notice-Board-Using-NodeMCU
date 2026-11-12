@@ -1,0 +1,81 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecureBearSSL.h>
+#include <DHT.h>
+
+const char* WIFI_SSID  = "Jay";
+const char* WIFI_PASS  = "MSP@1978";
+const char* SB_HOST    = "rduoupw*******gv.supabase.co";
+const char* SB_ANON    = "ey*************************************iOiJzdXBhYmF***********ZiI6InJkdW91cHd6dGRvZ2FvYmJxbGd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMyNTYwMDgsImV4cCI6MjEwODgzMjAwOH0.iM4Nb5icroUBclJGVCGCy_IGXqiXbOw37nsWB1-MR18";
+const char* DEVICE_KEY = "CHANGE_ME_LONG_RANDOM_DEVICE_KEY";   
+#define DHTPIN  D4
+#define DHTTYPE DHT11
+const unsigned long PUSH_EVERY = 10000;
+
+DHT dht(DHTPIN, DHTTYPE);
+BearSSL::WiFiClientSecure tls;
+BearSSL::Session session;
+HTTPClient http;                
+char url[96], body[200];
+unsigned long lastPush = 0;
+
+void wifiUp() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("WiFi");
+  for (int i = 0; i < 40 && WiFi.status() != WL_CONNECTED; i++) { delay(500); Serial.print("."); }
+  Serial.println(WiFi.status() == WL_CONNECTED ? " connected" : " failed");
+}
+
+void push() {
+  float t = dht.readTemperature(), h = dht.readHumidity();
+  long g = 0;
+  for (int i = 0; i < 8; i++) { g += analogRead(A0); delay(5); }
+  g /= 8;
+  char ts[12] = "null", hs[12] = "null";
+  if (!isnan(t)) dtostrf(t, 1, 1, ts);
+  if (!isnan(h)) dtostrf(h, 1, 0, hs);
+  snprintf(body, sizeof(body), "{\"device_key\":\"%s\",\"t\":%s,\"h\":%s,\"g\":%ld,\"rs\":%d,\"up\":%lu}",
+           DEVICE_KEY, ts, hs, g, WiFi.RSSI(), millis() / 1000);
+
+  int code = -1;
+  if (http.begin(tls, url)) {
+    http.setReuse(true);
+    http.setTimeout(15000);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("apikey", SB_ANON);
+    http.addHeader("Authorization", String("Bearer ") + SB_ANON);
+    code = http.POST((uint8_t*)body, strlen(body));
+    if (code > 0 && code != 204 && code != 200) Serial.println("Server said: " + http.getString());
+    http.end();
+  }
+  Serial.printf("T=%s H=%s GAS=%ld -> HTTP %d  (free heap %u)\n", ts, hs, g, code, ESP.getFreeHeap());
+  if (code < 0) {                          // drop the broken connection, retry in 3 s
+    Serial.println(http.errorToString(code));
+    tls.stop();
+    lastPush = millis() - PUSH_EVERY + 3000;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println();
+  Serial.println("Reset reason: " + ESP.getResetReason());
+  dht.begin();
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+  WiFi.setAutoReconnect(true);
+  tls.setInsecure();
+  tls.setSession(&session);
+  snprintf(url, sizeof(url), "https://%s/rest/v1/rpc/esp_push", SB_HOST);
+  wifiUp();
+}
+
+void loop() {
+  wifiUp();
+  if (WiFi.status() == WL_CONNECTED && millis() - lastPush >= PUSH_EVERY) {
+    lastPush = millis();
+    push();
+  }
+  delay(50);
+}
